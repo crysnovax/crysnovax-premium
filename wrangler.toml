@@ -1,0 +1,28 @@
+name = "crysnovax-premium"
+account_id = "282b269d2530a8f05d715d715c81ba69"
+main = "src/worker.js"
+compatibility_date = "2026-07-16"
+workers_dev = true
+
+[vars]
+DASHBOARD_ORIGIN = "https://premium.crysnova.qzz.io"
+API_VERSION = "v1"
+API_SECRET = "CARAYASATA1LALA2VA3"
+TELEGRAM_BOT_USERNAME = "CODYEBOT"
+ADMIN_PASSWORD = "CARAYASATA1LALA2VA3"
+ADMIN_TELEGRAM_IDS = "7770578824"
+TELEGRAM_BOT_TOKEN = "8289204973:AAEKokEA5Ti9ks_ekQYNjW3UulIZ3wA6Ab0"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "crysnovax-premium"
+database_id = "fe3eaf24-9ac7-444b-b7e7-692f36452451"
+migrations_dir = "migrations"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = true
+
+[triggers]
+crons = ["17 0 * * *"]
