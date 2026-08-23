@@ -197,6 +197,16 @@ async function mutateAdmin(env, actor, action, input, request) {
       await notifyTelegram(env, String(before.telegram_id), `Your <b>${before.plan_id}</b> premium access has been revoked. Contact support if you believe this is an error.`);
     }
   }
+  else if(action==='unrestrict' || action==='unban'){
+    const scope = input.scope === 'group' ? 'group' : 'user';
+    const target = String(input.telegramId || '');
+    if (!target || !/^-?\d+$/.test(target)) throw new ApiError('A numeric telegramId is required');
+    const kind = action === 'unban' ? 'ban' : 'restrict';
+    before = await env.DB.prepare('SELECT * FROM restrictions WHERE active=1 AND scope=? AND telegram_id=? AND kind=? ORDER BY created_at DESC LIMIT 1').bind(scope, target, kind).first();
+    const result = await env.DB.prepare('UPDATE restrictions SET active=0 WHERE active=1 AND scope=? AND telegram_id=? AND kind=?').bind(scope, target, kind).run();
+    after = { scope, target, kind, changed: Number(result?.meta?.changes || 0), active: false };
+    for (const oid of ownerIds) await notifyTelegram(env, oid, `<b>${action === 'unban' ? 'Ban removed' : 'Restriction removed'}</b> by admin ${actor.telegram_id}\nTarget: <code>${target}</code>  Scope: ${scope}\nChanged: ${after.changed}`);
+  }
   else if(action==='reset'){
     const scope=input.scope||'user',target=String(input.telegramId);
     before={scope,target}; await env.DB.prepare('DELETE FROM usage_daily WHERE scope=? AND telegram_id=?').bind(scope,target).run(); after={scope,target,reset:true};
