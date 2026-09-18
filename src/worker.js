@@ -216,6 +216,48 @@ async function mutateAdmin(env, actor, action, input, request) {
   await audit(env,actor.telegram_id,action,input.scope||action,input.telegramId||input.id||input.name,before,after,input.reason,requestId);
   return after;
 }
+function decodeObject(value) {
+  try { const parsed = JSON.parse(value || '{}'); return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}; } catch (_) { return {}; }
+}
+async function getGroupSettings(env, chatId) {
+  const row = await env.DB.prepare('SELECT * FROM group_settings WHERE chat_id=?').bind(String(chatId)).first();
+  return row ? { chatId: row.chat_id, title: row.title, language: row.language, version: Number(row.version || 0), settings: decodeObject(row.settings), createdAt: row.created_at, updatedAt: row.updated_at } : null;
+}
+async function saveGroupSettings(env, input) {
+  const chatId = String(input.chatId || '');
+  if (!/^-?\d+$/.test(chatId)) throw new ApiError('A numeric chatId is required');
+  const current = await getGroupSettings(env, chatId);
+  const stamp = now();
+  const settings = { ...(current?.settings || {}), ...(input.settings && typeof input.settings === 'object' ? input.settings : {}) };
+  const version = Math.max(Number(current?.version || 0), Number(settings.settingsVersion || 0)) + 1;
+  settings.settingsVersion = version;
+  const title = input.title === undefined ? (current?.title || null) : safe(input.title);
+  const language = input.language === undefined ? (current?.language || 'en') : safe(input.language).slice(0, 16) || 'en';
+  await env.DB.prepare('INSERT INTO group_settings(chat_id,title,language,settings,version,created_at,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET title=excluded.title,language=excluded.language,settings=excluded.settings,version=excluded.version,updated_at=excluded.updated_at').bind(chatId, title, language, JSON.stringify(settings), version, current?.createdAt || stamp, stamp).run();
+  return getGroupSettings(env, chatId);
+}
+async function getUserPreferences(env, telegramId) {
+  const row = await env.DB.prepare('SELECT * FROM user_preferences WHERE telegram_id=?').bind(String(telegramId)).first();
+  return row ? { telegramId: row.telegram_id, preferences: decodeObject(row.preferences), createdAt: row.created_at, updatedAt: row.updated_at } : null;
+}
+async function saveUserPreferences(env, input) {
+  const telegramId = String(input.telegramId || '');
+  if (!/^\d+$/.test(telegramId)) throw new ApiError('A numeric telegramId is required');
+  const current = await getUserPreferences(env, telegramId);
+  const stamp = now();
+  const preferences = { ...(current?.preferences || {}), ...(input.preferences && typeof input.preferences === 'object' ? input.preferences : {}) };
+  await env.DB.prepare('INSERT INTO user_preferences(telegram_id,preferences,created_at,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(telegram_id) DO UPDATE SET preferences=excluded.preferences,updated_at=excluded.updated_at').bind(telegramId, JSON.stringify(preferences), current?.createdAt || stamp, stamp).run();
+  return getUserPreferences(env, telegramId);
+}
+async function syncHealth(env) {
+  return (await env.DB.prepare('SELECT * FROM sync_health WHERE id=1').first()) || { id: 1, failure_count: 0, groups_synced: 0, users_synced: 0 };
+}
+async function recordSyncHeartbeat(env, input) {
+  const current = await syncHealth(env); const stamp = now();
+  const failed = Number(input.failures || 0) > 0;
+  await env.DB.prepare('INSERT INTO sync_health(id,last_heartbeat,last_success,last_failure,failure_count,groups_synced,users_synced,updated_at) VALUES(1,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET last_heartbeat=excluded.last_heartbeat,last_success=excluded.last_success,last_failure=excluded.last_failure,failure_count=excluded.failure_count,groups_synced=excluded.groups_synced,users_synced=excluded.users_synced,updated_at=excluded.updated_at').bind(stamp, failed ? current.last_success || null : stamp, failed ? stamp : current.last_failure || null, Number(current.failure_count || 0) + Number(input.failures || 0), Number(input.groupsSynced || 0), Number(input.usersSynced || 0), stamp).run();
+  return syncHealth(env);
+}
 async function route(request, env) {
   const url=new URL(request.url), path=url.pathname;
   if(path==='/health') return json({ok:true,service:'crysnovax-premium',time:now()});
@@ -227,6 +269,12 @@ async function route(request, env) {
   if(path.startsWith('/api/v1/')) { const bodyText=['POST','PUT','PATCH'].includes(request.method)?await request.clone().text():''; await authenticateBot(request,env,bodyText); const input=bodyText?JSON.parse(bodyText):{};
     if(path==='/api/v1/commands') return json({commands:(await env.DB.prepare('SELECT name,category,enabled,premium_only,free_limit,premium_limit,group_limit,member_limit,updated_at FROM commands').all()).results.map(r=>({...r,enabled:Boolean(r.enabled),premium_only:Boolean(r.premium_only)}))});
     if(path==='/api/v1/plans') return json({plans:await plans(env)}); if(path==='/api/v1/status') return json(await status(env,url.searchParams.get('userId'),url.searchParams.get('chatId'))); if(path==='/api/v1/stats') return json(await overview(env)); if(path==='/api/v1/usage/consume') return json(await consume(env,input)); if(path==='/api/v1/usage/refund') return json(await refundUsage(env,input)); if(path==='/api/v1/invoices') return json(await createIntent(env,input)); if(path==='/api/v1/invoices/validate') return json(await validateIntent(env,input)); if(path==='/api/v1/payments') return json(await recordPayment(env,input));
+    if(path==='/api/v1/sync/heartbeat' && request.method==='POST') return json({ health: await recordSyncHeartbeat(env, input) });
+    if(path==='/api/v1/sync/health' && request.method==='GET') return json({ health: await syncHealth(env) });
+    if(path==='/api/v1/group-settings' && request.method==='GET') { const chatId = url.searchParams.get('chatId'); if (!/^-?\d+$/.test(String(chatId || ''))) throw new ApiError('A numeric chatId is required'); return json({ settings: await getGroupSettings(env, chatId) }); }
+    if(path==='/api/v1/group-settings' && request.method==='PUT') return json({ settings: await saveGroupSettings(env, input) });
+    if(path==='/api/v1/user-preferences' && request.method==='GET') { const telegramId = url.searchParams.get('telegramId'); if (!/^\d+$/.test(String(telegramId || ''))) throw new ApiError('A numeric telegramId is required'); return json({ preferences: await getUserPreferences(env, telegramId) }); }
+    if(path==='/api/v1/user-preferences' && request.method==='PUT') return json({ preferences: await saveUserPreferences(env, input) });
     if(path.startsWith('/api/v1/admin/')) { const allowed=String(env.ADMIN_TELEGRAM_IDS||'').split(',').map(x=>x.trim()); if(!allowed.includes(String(input.actorId))) throw new ApiError('Owner authorization required',403); const actor={telegram_id:String(input.actorId),role:'owner'}; return json({result:await mutateAdmin(env,actor,path.split('/').pop(),input,request)}); }
   }
   if(path==='/'||path==='/dashboard') return env.ASSETS?env.ASSETS.fetch(new Request(new URL('/',request.url),request)):new Response('Premium dashboard assets are not configured',{status:503});
